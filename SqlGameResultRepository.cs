@@ -57,17 +57,20 @@ namespace Checkers.Data
             string combined = $"{saltHex}:{hashHex}";
 
             // Insert record
-            ExecuteNonQuery(
-                @"INSERT INTO Player (Username, Password, Scoring, [Private question], Answer, winNumber, loseNumber)
-                  VALUES (@user, @pass, 0, @q, @ans, 0, 0)",
-                cmd =>
-                {
-                    cmd.Parameters.AddWithValue("@user", username);
-                    cmd.Parameters.AddWithValue("@pass", combined);
-                    cmd.Parameters.AddWithValue("@q", privateQuestion);
-                    cmd.Parameters.AddWithValue("@ans", answer);
-                }
-            );
+                    ExecuteNonQuery(
+              @"INSERT INTO Player
+                 (Username, Password, Scoring, PrivateQuestion, PrivateAnswer, winNumber, loseNumber)
+              VALUES
+                 (@user, @pass,   0,           @q,               @ans,          0,         0)",
+              cmd =>
+              {
+                  cmd.Parameters.AddWithValue("@user", username);
+                  cmd.Parameters.AddWithValue("@pass", combined);
+                  cmd.Parameters.AddWithValue("@q", privateQuestion);
+                  cmd.Parameters.AddWithValue("@ans", answer);
+              }
+          );
+
         }
 
         /// <summary>
@@ -137,8 +140,8 @@ namespace Checkers.Data
         /// </summary>
         public string GetPrivateQuestion(string username)
             => QuerySingle<string>(
-                "SELECT [Private question] FROM Player WHERE Username = @user",
-                cmd => cmd.Parameters.AddWithValue("@user", username)
+            "SELECT PrivateQuestion FROM Player WHERE Username = @user",
+             cmd => cmd.Parameters.AddWithValue("@user", username)
             );
 
         /// <summary>
@@ -146,7 +149,7 @@ namespace Checkers.Data
         /// </summary>
         public string GetAnswer(string username)
             => QuerySingle<string>(
-                "SELECT Answer FROM Player WHERE Username = @user",
+                "SELECT PrivateAnswer FROM Player WHERE Username = @user",
                 cmd => cmd.Parameters.AddWithValue("@user", username)
             );
 
@@ -155,7 +158,7 @@ namespace Checkers.Data
         /// </summary>
         public DataTable GetPrivateQuestionTable(string username)
             => ExecuteSelect(
-                "SELECT [Private question] AS Question FROM Player WHERE Username = @user",
+                "SELECT PrivateQuestion AS Question FROM Player WHERE Username = @user",
                 cmd => cmd.Parameters.AddWithValue("@user", username)
             );
 
@@ -262,10 +265,27 @@ namespace Checkers.Data
         /// </summary>
         public void RefreshPlayerScores()
         {
-            ExecuteNonQuery("UPDATE Player SET winNumber=(SELECT COUNT(*) FROM Games WHERE Winner=Player.Username)");
-            ExecuteNonQuery("UPDATE Player SET loseNumber=(SELECT COUNT(*) FROM Games WHERE (PlayerA=Player.Username OR PlayerB=Player.Username) AND Winner<>Player.Username)");
-            ExecuteNonQuery("UPDATE Player SET Scoring=winNumber-loseNumber");
+            const string sql = @"
+            UPDATE dbo.Player
+            SET 
+                winNumber  = (SELECT COUNT(*) 
+                              FROM dbo.Games 
+                              WHERE Winner = Player.Username),
+                loseNumber = (SELECT COUNT(*) 
+                              FROM dbo.Games 
+                              WHERE (PlayerA = Player.Username OR PlayerB = Player.Username)
+                                AND Winner <> Player.Username),
+                Scoring    = (SELECT COUNT(*) 
+                              FROM dbo.Games 
+                              WHERE Winner = Player.Username)
+                           - (SELECT COUNT(*) 
+                              FROM dbo.Games 
+                              WHERE (PlayerA = Player.Username OR PlayerB = Player.Username)
+                                AND Winner <> Player.Username);
+            ";
+            ExecuteNonQuery(sql);
         }
+
 
         /// <summary>
         /// Logs an exception to the ErrorLog table with timestamp.

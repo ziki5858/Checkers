@@ -75,9 +75,6 @@ namespace Checkers
         private readonly Action<int> _setWinnerAnnounced;
         private readonly Func<bool> _getIsPlayer1Turn;
         private readonly Action<bool> _setIsPlayer1Turn;
-        private readonly Func<string> _getPlayer1;
-        private readonly Func<string> _getPlayer2;
-
 
         public FuncGameStateTracker(
             Func<int> getWinnerAnnounced,
