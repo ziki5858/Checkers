@@ -61,7 +61,6 @@ namespace Checkers
         }
 
         #region Initialization Methods
-
         private void InitializeManagers()
         {
             _boardManager = new GameBoardManager(boardPanel, _boardSize, _highlightColor, UpdateTurnLabel);
@@ -94,30 +93,53 @@ namespace Checkers
 
         private GameFlowManager CreateFlowManager()
         {
-            return new GameFlowManager(
-                _boardLogic,
-                _boardButtons,
-                _boardManager,
-                _logicManager,
-                UpdateTurnLabel,
-                _connection,
-                () => _player1,
-                () => _player2,
-                () => _againstComputer,
+            // 1. Create game settings (use positional args or the actual parameter names)
+            var settings = new GameSettings(
                 Player1Queen,
                 Player2Queen,
                 EmptySymbol,
-                turnTimer,
-                () => _isPlayer1Turn ? 0 : 1,
+                6);
+
+            // 2. Game state tracker
+            var stateTracker = new FuncGameStateTracker(
                 () => _winnerAnnounced,
                 v => _winnerAnnounced = v,
-                () => _computerMoveDone,
-                v => _computerMoveDone = v,
                 () => _isPlayer1Turn,
-                v => _isPlayer1Turn = v,
+                v => _isPlayer1Turn = v
+            );
+
+            // 3. Computer controller
+            var computerController = new FuncComputerController(
+                () => _againstComputer,
+                () => _computerMoveDone,
+                v => _computerMoveDone = v
+            );
+
+            // 4. UI adapter
+            var gameUI = new DelegateGameUI(
+                UpdateTurnLabel,
                 () => _modeChosen = false,
-                _repository,
-                6);
+                turnTimer
+            );
+
+            // 5. Wrap your existing SqlGameResultRepository in the adapter
+            IGameRepository repo = new SqlGameResultRepositoryAdapter(_connection);
+
+            // 6. Finally create the flow manager (positional args)
+             return new GameFlowManager(
+                 _boardLogic,
+                 _boardButtons,
+                 _boardManager,
+                 _logicManager,
+                 settings,
+                 stateTracker,
+                 computerController,
+                 gameUI,
+                 repo,
+                 getPlayer1: () => _player1,
+                 getPlayer2: () => _player2
+             );
+
         }
 
         #endregion

@@ -1,119 +1,193 @@
 ﻿using Checkers.Data;
 using System;
-using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
-using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 
 namespace Checkers
 {
+    // 1. GameSettings
+    public class GameSettings
+    {
+        public string Player1Queen { get; }
+        public string Player2Queen { get; }
+        public string EmptySymbol { get; }
+        public int AIDepth { get; }
+
+        public GameSettings(string p1Queen, string p2Queen, string empty, int aiDepth)
+        {
+            Player1Queen = p1Queen;
+            Player2Queen = p2Queen;
+            EmptySymbol = empty;
+            AIDepth = aiDepth;
+        }
+    }
+
+    // 2. IGameStateTracker
+    public interface IGameStateTracker
+    {
+        int WinnerAnnounced { get; set; }
+        bool IsPlayer1Turn { get; set; }
+    }
+
+    // 3. IComputerController
+    public interface IComputerController
+    {
+        bool AgainstComputer { get; }
+        bool ComputerMoveDone { get; set; }
+    }
+
+    // 4. IGameUI
+    public interface IGameUI
+    {
+        void UpdateTurnLabel();
+        void OnGameEnded();
+        Timer GameTimer { get; }
+    }
+
+    // 5. IGameRepository (wraps your existing SqlGameResultRepository)
+    public interface IGameRepository
+    {
+        void UpdateScore(string player, int points);
+        void RecordWin(string winnerName, string player1, string player2, DateTime timestamp);
+    }
+
+    // Adapter: delegates calls to SqlGameResultRepository
+    public class SqlGameResultRepositoryAdapter : IGameRepository
+    {
+        private readonly SqlGameResultRepository _inner;
+        public SqlGameResultRepositoryAdapter(SqlConnection cnn)
+        {
+            _inner = new SqlGameResultRepository(cnn);
+        }
+        public void UpdateScore(string player, int points)
+            => _inner.UpdateScore(player, points);
+
+        public void RecordWin(string winnerName, string player1, string player2, DateTime timestamp)
+            => _inner.RecordWin(winnerName, player1, player2, timestamp);
+    }
+
+    // Adapter for IGameStateTracker
+    public class FuncGameStateTracker : IGameStateTracker
+    {
+        private readonly Func<int> _getWinnerAnnounced;
+        private readonly Action<int> _setWinnerAnnounced;
+        private readonly Func<bool> _getIsPlayer1Turn;
+        private readonly Action<bool> _setIsPlayer1Turn;
+        private readonly Func<string> _getPlayer1;
+        private readonly Func<string> _getPlayer2;
+
+
+        public FuncGameStateTracker(
+            Func<int> getWinnerAnnounced,
+            Action<int> setWinnerAnnounced,
+            Func<bool> getIsPlayer1Turn,
+            Action<bool> setIsPlayer1Turn)
+        {
+            _getWinnerAnnounced = getWinnerAnnounced;
+            _setWinnerAnnounced = setWinnerAnnounced;
+            _getIsPlayer1Turn = getIsPlayer1Turn;
+            _setIsPlayer1Turn = setIsPlayer1Turn;
+        }
+
+        public int WinnerAnnounced { get => _getWinnerAnnounced(); set => _setWinnerAnnounced(value); }
+        public bool IsPlayer1Turn { get => _getIsPlayer1Turn(); set => _setIsPlayer1Turn(value); }
+    }
+
+    // Adapter for IComputerController
+    public class FuncComputerController : IComputerController
+    {
+        private readonly Func<bool> _getAgainstComputer;
+        private readonly Func<bool> _getMoveDone;
+        private readonly Action<bool> _setMoveDone;
+
+        public FuncComputerController(
+            Func<bool> getAgainstComputer,
+            Func<bool> getMoveDone,
+            Action<bool> setMoveDone)
+        {
+            _getAgainstComputer = getAgainstComputer;
+            _getMoveDone = getMoveDone;
+            _setMoveDone = setMoveDone;
+        }
+
+        public bool AgainstComputer => _getAgainstComputer();
+        public bool ComputerMoveDone { get => _getMoveDone(); set => _setMoveDone(value); }
+    }
+
+    // Adapter for IGameUI
+    public class DelegateGameUI : IGameUI
+    {
+        private readonly Action _updateTurnLabel;
+        private readonly Action _onGameEnded;
+        public Timer GameTimer { get; }
+
+        public DelegateGameUI(Action updateTurnLabel, Action onGameEnded, Timer gameTimer)
+        {
+            _updateTurnLabel = updateTurnLabel;
+            _onGameEnded = onGameEnded;
+            GameTimer = gameTimer;
+        }
+
+        public void UpdateTurnLabel() => _updateTurnLabel();
+        public void OnGameEnded() => _onGameEnded();
+    }
+
     /// <summary>
-    /// Manages the game flow including player and computer moves, turn tracking, win detection, and database updates.
+    /// Handles full game flow: moves, captures, promotions, win logic & database.
     /// </summary>
     internal class GameFlowManager
     {
-        // ----- Board & UI -----
-        private readonly int[,] boardLogic;
-        private readonly Button[,] boardButtons;
-        private readonly GameBoardManager boardManager;
-        private readonly GameLogicManager gameLogicManager;
+        // Board & logic
+        private readonly int[,] _boardLogic;
+        private readonly Button[,] _boardButtons;
+        private readonly GameBoardManager _boardManager;
+        private readonly GameLogicManager _logicManager;
+        private readonly GameSettings _settings;
+        // State & AI
+        private readonly IGameStateTracker _state;
+        private readonly IComputerController _computer;
+        // UI & repo
+        private readonly IGameUI _ui;
+        private readonly IGameRepository _repo;
+        // Player providers
+        private readonly Func<string> _getPlayer1;
+        private readonly Func<string> _getPlayer2;
 
-        // ----- Callbacks & Database -----
-        private readonly Action updateTurnLabel;
-        private readonly SqlConnection cnn;
+        // קבוע לשם המחשב
+        private const string ComputerUser = "Computer";
 
-        // ----- Player Providers -----
-        private readonly Func<string> getPlayer1;
-        private readonly Func<string> getPlayer2;
-
-        // ----- Flags -----
-        private readonly Func<bool> getAgainstComputer;
-        private readonly Func<bool> getComputerMoveDone;
-        private readonly Func<bool> getIsPlayer1Turn;
-        private readonly Action<bool> setComputerMoveDone;
-        private readonly Action<bool> setIsPlayer1Turn;
-
-        // ----- Turn & Winner Tracking -----
-        private readonly Func<int> getCurrentTurn;
-        private readonly Func<int> getWinnerAnnounced;
-        private readonly Action<int> setWinnerAnnounced;
-
-        // ----- Game Symbols & AI Depth -----
-        private readonly string PLAYER1_QUEEN;
-        private readonly string PLAYER2_QUEEN;
-        private readonly string EMPTY;
-        private readonly int computerDifficultyDepth;
-
-        // ----- Timer & End-of-Game Callback -----
-        private readonly Timer timer;
-        private readonly Action onGameEnded;
-
-        // ----- Repository -----
-        private readonly SqlGameResultRepository repo;
-
-        /// <summary>
-        /// Initializes a new instance of the GameFlowManager class with all required dependencies.
-        /// </summary>
         public GameFlowManager(
             int[,] boardLogic,
             Button[,] boardButtons,
             GameBoardManager boardManager,
-            GameLogicManager gameLogicManager,
-            Action updateTurnLabel,
-            SqlConnection cnn,
+            GameLogicManager logicManager,
+            GameSettings settings,
+            IGameStateTracker state,
+            IComputerController computer,
+            IGameUI ui,
+            IGameRepository repo,
             Func<string> getPlayer1,
-            Func<string> getPlayer2,
-            Func<bool> getAgainstComputer,
-            string player1QueenSymbol,
-            string player2QueenSymbol,
-            string emptySymbol,
-            Timer timer,
-            Func<int> getCurrentTurn,
-            Func<int> getWinnerAnnounced,
-            Action<int> setWinnerAnnounced,
-            Func<bool> getComputerMoveDone,
-            Action<bool> setComputerMoveDone,
-            Func<bool> getIsPlayer1Turn,
-            Action<bool> setIsPlayer1Turn,
-            Action onGameEnded,
-            SqlGameResultRepository repo,
-            int computerDifficultyDepth = 6)
+            Func<string> getPlayer2)
         {
-            this.boardLogic = boardLogic;
-            this.boardButtons = boardButtons;
-            this.boardManager = boardManager;
-            this.gameLogicManager = gameLogicManager;
-            this.updateTurnLabel = updateTurnLabel;
-            this.cnn = cnn;
-            this.getPlayer1 = getPlayer1;
-            this.getPlayer2 = getPlayer2;
-            this.getAgainstComputer = getAgainstComputer;
-            PLAYER1_QUEEN = player1QueenSymbol;
-            PLAYER2_QUEEN = player2QueenSymbol;
-            EMPTY = emptySymbol;
-            this.timer = timer;
-            this.getCurrentTurn = getCurrentTurn;
-            this.getWinnerAnnounced = getWinnerAnnounced;
-            this.setWinnerAnnounced = setWinnerAnnounced;
-            this.getComputerMoveDone = getComputerMoveDone;
-            this.setComputerMoveDone = setComputerMoveDone;
-            this.getIsPlayer1Turn = getIsPlayer1Turn;
-            this.setIsPlayer1Turn = setIsPlayer1Turn;
-            this.onGameEnded = onGameEnded;
-            this.repo = repo;
-            this.computerDifficultyDepth = computerDifficultyDepth;
+            _boardLogic = boardLogic;
+            _boardButtons = boardButtons;
+            _boardManager = boardManager;
+            _logicManager = logicManager;
+            _settings = settings;
+            _state = state;
+            _computer = computer;
+            _ui = ui;
+            _repo = repo;
+            _getPlayer1 = getPlayer1;
+            _getPlayer2 = getPlayer2;
         }
 
-        /// <summary>
-        /// Executes a move initiated by the human player, including capture and promotion.
-        /// </summary>
         public void ExecutePlayerMove(int fromY, int fromX, int toY, int toX)
         {
-            int rows = boardButtons.GetLength(0);
-            int cols = boardButtons.GetLength(1);
-            // Ensure coordinates are valid
+            int rows = _boardButtons.GetLength(0);
+            int cols = _boardButtons.GetLength(1);
             if (fromY < 0 || fromX < 0 || toY < 0 || toX < 0 ||
                 fromY >= rows || fromX >= cols || toY >= rows || toX >= cols)
             {
@@ -121,124 +195,112 @@ namespace Checkers
                 return;
             }
 
-            // If capturing a piece by jumping two squares
+            // capture
             if (Math.Abs(toX - fromX) == 2)
             {
                 int midY = (fromY + toY) / 2;
                 int midX = (fromX + toX) / 2;
-                boardButtons[midY, midX].Text = EMPTY;
-                boardLogic[midY, midX] = 0;
+                _boardButtons[midY, midX].Text = _settings.EmptySymbol;
+                _boardLogic[midY, midX] = 0;
             }
 
-            // Move piece visually and in logic
-            boardButtons[toY, toX].Text = boardButtons[fromY, fromX].Text;
-            boardLogic[toY, toX] = boardLogic[fromY, fromX];
-            boardButtons[fromY, fromX].Text = EMPTY;
-            boardLogic[fromY, fromX] = 0;
+            // move
+            _boardButtons[toY, toX].Text = _boardButtons[fromY, fromX].Text;
+            _boardLogic[toY, toX] = _boardLogic[fromY, fromX];
+            _boardButtons[fromY, fromX].Text = _settings.EmptySymbol;
+            _boardLogic[fromY, fromX] = 0;
 
-            // Check for promotion to queen
-            if (toY == 0 && boardLogic[toY, toX] == 1)
+            // promotion
+            if (toY == 0 && _boardLogic[toY, toX] == 1)
             {
-                boardButtons[toY, toX].Text = PLAYER1_QUEEN;
-                boardLogic[toY, toX] = 2;
+                _boardButtons[toY, toX].Text = _settings.Player1Queen;
+                _boardLogic[toY, toX] = 2;
             }
-            else if (toY == rows - 1 && boardLogic[toY, toX] == -1)
+            else if (toY == rows - 1 && _boardLogic[toY, toX] == -1)
             {
-                boardButtons[toY, toX].Text = PLAYER2_QUEEN;
-                boardLogic[toY, toX] = -2;
+                _boardButtons[toY, toX].Text = _settings.Player2Queen;
+                _boardLogic[toY, toX] = -2;
             }
 
             CompleteTurn(isPlayerMove: true);
         }
 
-        /// <summary>
-        /// Determines and executes a move for the computer using the AI engine.
-        /// </summary>
         public void ExecuteComputerMove()
         {
-            var possibleMoves = AiEngine.CalculateComputerMoves(
-                boardLogic, computerDifficultyDepth, gameLogicManager);
-            if (!possibleMoves.Any()) return;
+            var bestMoves = AiEngine.CalculateComputerMoves(
+                _boardLogic,
+                _settings.AIDepth,
+                _logicManager);
 
-            // Select a random move from the best moves
-            var move = possibleMoves[new Random().Next(possibleMoves.Count)];
-            // Capture logic
+            if (!bestMoves.Any()) return;
+
+            var move = bestMoves[new Random().Next(bestMoves.Count)];
+
+            // capture
             if (Math.Abs(move.XTo - move.XFrom) == 2)
             {
                 int midY = (move.YFrom + move.YTo) / 2;
                 int midX = (move.XFrom + move.XTo) / 2;
-                boardButtons[midY, midX].Text = EMPTY;
-                boardLogic[midY, midX] = 0;
+                _boardButtons[midY, midX].Text = _settings.EmptySymbol;
+                _boardLogic[midY, midX] = 0;
             }
 
-            // Execute the move
-            boardButtons[move.YTo, move.XTo].Text = boardButtons[move.YFrom, move.XFrom].Text;
-            boardLogic[move.YTo, move.XTo] = boardLogic[move.YFrom, move.XFrom];
-            boardButtons[move.YFrom, move.XFrom].Text = EMPTY;
-            boardLogic[move.YFrom, move.XFrom] = 0;
+            // move
+            _boardButtons[move.YTo, move.XTo].Text = _boardButtons[move.YFrom, move.XFrom].Text;
+            _boardLogic[move.YTo, move.XTo] = _boardLogic[move.YFrom, move.XFrom];
+            _boardButtons[move.YFrom, move.XFrom].Text = _settings.EmptySymbol;
+            _boardLogic[move.YFrom, move.XFrom] = 0;
 
-            // Promotion for computer
-            if (boardLogic[move.YTo, move.XTo] == -1 && move.YTo == boardButtons.GetLength(0) - 1)
+            // promotion
+            if (_boardLogic[move.YTo, move.XTo] == -1 &&
+                move.YTo == _boardButtons.GetLength(0) - 1)
             {
-                boardButtons[move.YTo, move.XTo].Text = PLAYER2_QUEEN;
-                boardLogic[move.YTo, move.XTo] = -2;
+                _boardButtons[move.YTo, move.XTo].Text = _settings.Player2Queen;
+                _boardLogic[move.YTo, move.XTo] = -2;
             }
 
             CompleteTurn(isPlayerMove: false);
         }
 
-        /// <summary>
-        /// Completes a turn by checking for victory, resetting highlights, toggling turn, and updating UI.
-        /// </summary>
         private void CompleteTurn(bool isPlayerMove)
         {
-            bool playerTurn = getCurrentTurn() % 2 == 0;
-            if (gameLogicManager.CheckWin(boardLogic, playerTurn))
-            {
+            bool playerTurn = _state.IsPlayer1Turn;
+            if (_logicManager.CheckWin(_boardLogic, playerTurn))
                 HandleWin(isPlayerMove);
-            }
 
-            boardManager.ResetMoveHighlights();
-            setWinnerAnnounced(getWinnerAnnounced());
-            setIsPlayer1Turn(!getIsPlayer1Turn());
-            updateTurnLabel();
+            _boardManager.ResetMoveHighlights();
+            _state.IsPlayer1Turn = !_state.IsPlayer1Turn;
+            _ui.UpdateTurnLabel();
         }
 
-        /// <summary>
-        /// Handles win scenario: updates database, shows message, and signals game end.
-        /// </summary>
         private void HandleWin(bool isPlayerMove)
         {
-            string winnerName = getCurrentTurn() % 2 == 0
-                ? getPlayer1()
-                : (getAgainstComputer() ? "Computer" : getPlayer2());
+            bool player1Turn = _state.IsPlayer1Turn;
 
-            // Start and stop timer for decoration
-            timer.Start();
+            // use the real names
+            string winnerName = player1Turn
+                ? _getPlayer1()
+                : (_computer.AgainstComputer ? ComputerUser : _getPlayer2());
 
-            // Award points in database
-            repo.UpdateScore(getPlayer1(), getCurrentTurn() % 2 == 0 ? 5 : 0);
-            if (!getAgainstComputer())
-                repo.UpdateScore(getPlayer2(), getCurrentTurn() % 2 != 0 ? 5 : 0);
+            _ui.GameTimer.Start();
+
+            // award points
+            _repo.UpdateScore(winnerName, 5);
+
+            // record the game with real player names
+            _repo.RecordWin(
+                winnerName,
+                _getPlayer1(),
+                (_computer.AgainstComputer ? ComputerUser : _getPlayer2()),
+                DateTime.Now);
 
             MessageBox.Show($"{winnerName} wins!");
 
-            // Record the game result
-            repo.RecordWin(
-                winnerName,
-                getPlayer1(),
-                getAgainstComputer() ? "Computer" : getPlayer2(),
-                DateTime.Now
-            );
-
-            timer.Stop();
-            setWinnerAnnounced(1);
-            onGameEnded?.Invoke();
+            _ui.GameTimer.Stop();
+            _state.WinnerAnnounced = 1;
+            _ui.OnGameEnded();
         }
 
-        /// <summary>
-        /// Executes an arbitrary SELECT SQL query and returns the results.
-        /// </summary>
         public static DataTable ExecuteSelectQuery(string query, SqlConnection cnn)
         {
             using (var cmd = new SqlCommand(query, cnn))
@@ -248,45 +310,6 @@ namespace Checkers
                 adapter.Fill(dt);
                 return dt;
             }
-        }
-
-        /// <summary>
-        /// Analyzes and classifies all possible computer moves into winning, threat, and risky categories.
-        /// </summary>
-        private (List<Move> winning, List<Move> threats, List<Move> risky) AnalyzeComputerMoves()
-        {
-            var winningMoves = new List<Move>();
-            var enemyThreats = new List<Move>();
-            var riskyMoves = new List<Move>();
-
-            int rows = boardButtons.GetLength(0);
-            int cols = boardButtons.GetLength(1);
-            bool playerTurn = getCurrentTurn() % 2 == 0;
-
-            for (int r = 0; r < rows; r++)
-            {
-                for (int c = 0; c < cols; c++)
-                {
-                    // Only evaluate computer's pieces (negative values)
-                    if (boardLogic[r, c] >= 0) continue;
-
-                    var moves = gameLogicManager.GetMoves(boardLogic, r, c, playerTurn);
-                    foreach (var move in moves)
-                    {
-                        AiEngine.ClassifyMove(
-                            move,
-                            boardLogic,
-                            gameLogicManager,
-                            ref winningMoves,
-                            ref enemyThreats,
-                            ref riskyMoves,
-                            depth: computerDifficultyDepth
-                        );
-                    }
-                }
-            }
-
-            return (winningMoves, enemyThreats, riskyMoves);
         }
     }
 }

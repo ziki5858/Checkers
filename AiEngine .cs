@@ -26,6 +26,7 @@ namespace Checkers
         private const int QUEEN_VALUE = 30;
         private const int PROGRESS_BONUS_PER_ROW = 2;
 
+
         /// <summary>
         /// Calculates the heuristic evaluation score of the current board state.
         /// Positive ⇒ advantage to the computer (Player 2 / negative pieces),
@@ -77,17 +78,13 @@ namespace Checkers
             var clone = (int[,])board.Clone();
             int lastRow = clone.GetLength(0) - 1;
 
-            // Promotion on last rank
             bool isPromotion = move.YTo == lastRow;
-
             clone[move.YTo, move.XTo] = isPromotion
                 ? (int)Piece.ComputerQueen
                 : clone[move.YFrom, move.XFrom];
 
-            // Clear source square
             clone[move.YFrom, move.XFrom] = (int)Piece.Empty;
 
-            // Clear captured piece if this was a capture
             if (move.IsCapture())
             {
                 int eatY = (move.YFrom + move.YTo) / 2;
@@ -98,46 +95,15 @@ namespace Checkers
             return clone;
         }
 
-        /// <summary>
-        /// Helper extension — determines whether the move is a capture
-        /// (distance 2 on the X-axis implies capture in checkers).
-        /// </summary>
-        public static bool IsCapture(this Move m)
-            => Math.Abs(m.XTo - m.XFrom) == 2;
-
-        /// <summary>
-        /// Builds the complete move list for the computer (negative pieces).
-        /// </summary>
         public static List<Move> GetAllComputerMoves(int[,] board, GameLogicManager logic)
             => GetAllMoves(board, logic, forComputer: true);
 
-        /// <summary>
-        /// Builds the complete move list for the human player (positive pieces).
-        /// </summary>
         public static List<Move> GetAllPlayerMoves(int[,] board, GameLogicManager logic)
             => GetAllMoves(board, logic, forComputer: false);
 
-        private static List<Move> GetAllMoves(
-            int[,] board,
-            GameLogicManager logic,
-            bool forComputer)
-        {
-            var list = new List<Move>();
-            int size = board.GetLength(0);
-
-            for (int r = 0; r < size; r++)
-            {
-                for (int c = 0; c < size; c++)
-                {
-                    int cell = board[r, c];
-                    if ((forComputer && cell < 0) || (!forComputer && cell > 0))
-                        list.AddRange(logic.GetMoves(board, r, c, !forComputer));
-                }
-            }
-
-            return list;
-        }
-
+        /// <summary>
+        /// Main entry for Minimax with Alpha-Beta pruning.
+        /// </summary>
         public static int MiniMaxAlphaBeta(
             int[,] board,
             int depth,
@@ -163,67 +129,6 @@ namespace Checkers
                 : MinBranch(board, depth, alpha, beta, logic, moves);
         }
 
-        private static void SortMoves(ref List<Move> moves, bool maximizing)
-        {
-            moves = maximizing
-                ? moves.OrderByDescending(m => m.Nikot).ToList()
-                : moves.OrderBy(m => m.Nikot).ToList();
-        }
-
-        private static int MaxBranch(
-            int[,] board,
-            int depth,
-            int alpha,
-            int beta,
-            GameLogicManager logic,
-            List<Move> moves)
-        {
-            int best = int.MinValue;
-
-            foreach (var mv in moves)
-            {
-                int score = MiniMaxAlphaBeta(
-                    ApplyMoveToBoard(board, mv),
-                    depth - 1,
-                    alpha, beta,
-                    maximizing: false,
-                    logic);
-
-                best = Math.Max(best, score);
-                alpha = Math.Max(alpha, score);
-                if (beta <= alpha) break; // prune
-            }
-
-            return best;
-        }
-
-        private static int MinBranch(
-            int[,] board,
-            int depth,
-            int alpha,
-            int beta,
-            GameLogicManager logic,
-            List<Move> moves)
-        {
-            int best = int.MaxValue;
-
-            foreach (var mv in moves)
-            {
-                int score = MiniMaxAlphaBeta(
-                    ApplyMoveToBoard(board, mv),
-                    depth - 1,
-                    alpha, beta,
-                    maximizing: true,
-                    logic);
-
-                best = Math.Min(best, score);
-                beta = Math.Min(beta, score);
-                if (beta <= alpha) break; // prune
-            }
-
-            return best;
-        }
-
         /// <summary>
         /// Assigns a Minimax score to every legal computer move and
         /// returns all moves that share the highest score (for random tie-break).
@@ -234,7 +139,6 @@ namespace Checkers
             GameLogicManager logic)
         {
             var list = new List<Move>();
-
             foreach (var mv in GetAllComputerMoves(board, logic))
             {
                 int[,] after = ApplyMoveToBoard(board, mv);
@@ -249,16 +153,12 @@ namespace Checkers
             }
 
             if (!list.Any()) return list;
-
             int best = list.Max(m => m.Nikot);
             return list.Where(m => m.Nikot == best).ToList();
         }
 
         /// <summary>
-        /// Categorizes a move as either:
-        /// - Winning (immediate win)
-        /// - Threatening (opponent has strong reply)
-        /// - Risky (no info yet / early depth)
+        /// Categorizes a move as either Winning, Threatening, or Risky.
         /// </summary>
         public static void ClassifyMove(
             Move move,
@@ -284,14 +184,12 @@ namespace Checkers
             }
 
             Move counter = GetBestEnemyResponse(simulated, move, logic);
-
             if (counter.YFrom != -1)
                 threats.Add(counter);
         }
 
         /// <summary>
-        /// Searches for the opponent’s highest-scoring move in response
-        /// (used by threat classification – not by Minimax).
+        /// Searches for the opponent’s highest-scoring move in response.
         /// </summary>
         public static Move GetBestEnemyResponse(
             int[,] board,
@@ -312,6 +210,88 @@ namespace Checkers
             }
 
             return bestMove;
+        }
+
+        public static bool IsCapture(this Move m)
+            => Math.Abs(m.XTo - m.XFrom) == 2;
+
+
+        private static List<Move> GetAllMoves(
+            int[,] board,
+            GameLogicManager logic,
+            bool forComputer)
+        {
+            var list = new List<Move>();
+            int size = board.GetLength(0);
+
+            for (int r = 0; r < size; r++)
+            {
+                for (int c = 0; c < size; c++)
+                {
+                    int cell = board[r, c];
+                    if ((forComputer && cell < 0) || (!forComputer && cell > 0))
+                        list.AddRange(logic.GetMoves(board, r, c, !forComputer));
+                }
+            }
+
+            return list;
+        }
+
+        private static void SortMoves(ref List<Move> moves, bool maximizing)
+        {
+            moves = maximizing
+                ? moves.OrderByDescending(m => m.Nikot).ToList()
+                : moves.OrderBy(m => m.Nikot).ToList();
+        }
+
+        private static int MaxBranch(
+            int[,] board,
+            int depth,
+            int alpha,
+            int beta,
+            GameLogicManager logic,
+            List<Move> moves)
+        {
+            int best = int.MinValue;
+            foreach (var mv in moves)
+            {
+                int score = MiniMaxAlphaBeta(
+                    ApplyMoveToBoard(board, mv),
+                    depth - 1,
+                    alpha, beta,
+                    maximizing: false,
+                    logic);
+
+                best = Math.Max(best, score);
+                alpha = Math.Max(alpha, score);
+                if (beta <= alpha) break; // prune
+            }
+            return best;
+        }
+
+        private static int MinBranch(
+            int[,] board,
+            int depth,
+            int alpha,
+            int beta,
+            GameLogicManager logic,
+            List<Move> moves)
+        {
+            int best = int.MaxValue;
+            foreach (var mv in moves)
+            {
+                int score = MiniMaxAlphaBeta(
+                    ApplyMoveToBoard(board, mv),
+                    depth - 1,
+                    alpha, beta,
+                    maximizing: true,
+                    logic);
+
+                best = Math.Min(best, score);
+                beta = Math.Min(beta, score);
+                if (beta <= alpha) break; // prune
+            }
+            return best;
         }
     }
 }
